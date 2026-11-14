@@ -1,0 +1,63 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# The verdict job reads this run's jobs through the GitHub API.
+permissions:
+  contents: read
+  actions: read
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_NO_INPUT: "1"
+
+jobs:
+  # Every build runs twice: a bare twin and a decoy twin dressed as a release.
+  # CRACI records every connection of both. Parallax diffs the two traces.
+  build:
+    name: build (${{ matrix.twin }})
+    runs-on: craci
+    strategy:
+      fail-fast: false
+      matrix:
+        twin: [bare, decoy]
+    steps:
+      - uses: cracicorp/setup@v1
+        with:
+          size: "1"
+          image: "default"
+      - uses: actions/checkout@v4
+      - name: Dress this twin
+        uses: Helios-One-Oy/parallax/dress@v0
+        with:
+          twin: ${{ matrix.twin }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Every package is pinned with its hashes: pip refuses anything else.
+      - run: plx-run python -m pip install --require-hashes -r requirements.lock
+      - run: plx-run python -m pytest
+      - run: plx-run python -m compileall -q northbound_api
+
+  # After both twins finish, Parallax fetches both traces + SBOMs from the CRACI
+  # API, diffs them, writes the job summary and fails on divergence.
+  # The judge sits outside the build network: CRACI does not let a job on its
+  # runners read CRACI's records ("Access denied"), so this one job is GitHub-hosted.
+  verdict:
+    needs: build
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parallax verdict
+        uses: Helios-One-Oy/parallax/verdict@v0
+        with:
+          craci-token: ${{ secrets.CRACI_API_TOKEN }}
+          github-token: ${{ github.token }}
